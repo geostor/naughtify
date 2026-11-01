@@ -128,7 +128,9 @@ cat app.js | npx naughtify -               # stdin to stdout
 | `--no-refusals`    |         | Skip fake refusal strings                 |
 
 Works on `.js`, `.jsx`, `.ts` and `.tsx`. TypeScript stays TypeScript.
-`--obfuscate` needs plain JS, so run it on your bundled output, not on source.
+`--obfuscate` is best on your bundled output. Pointed at `.ts`/`.tsx`/`.jsx`
+source, it strips types and compiles JSX first (via sucrase), so the result is
+plain obfuscated JS.
 
 ## Signals and decoys
 

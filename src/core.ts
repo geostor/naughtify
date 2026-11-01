@@ -5,6 +5,7 @@ import _traverse from "@babel/traverse";
 import _generate from "@babel/generator";
 import type { Binding } from "@babel/traverse";
 import _obfuscator from "javascript-obfuscator";
+import { transform as sucraseTransform } from "sucrase";
 import { COMMENTS, INVISIBLE_NOTICES, PREFIXES, REFUSAL_DECOYS, SUFFIXES } from "./wordlists.ts";
 
 // These deps ship CJS; normalize default export under ESM interop.
@@ -101,7 +102,16 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
   // whatever reads the raw source. The obfuscator does its own (far stronger)
   // renaming, so we skip our Babel rename pass here.
   if (obfuscate) {
-    const result = obfuscator.obfuscate(code, {
+    // javascript-obfuscator only understands plain JS, so strip TS types and
+    // compile JSX first when the input isn't already .js.
+    const transforms: ("typescript" | "jsx")[] = [];
+    if (/\.tsx$/.test(opts.filename ?? "")) transforms.push("typescript", "jsx");
+    else if (/\.[cm]?ts$/.test(opts.filename ?? "")) transforms.push("typescript");
+    else if (/\.jsx$/.test(opts.filename ?? "")) transforms.push("jsx");
+    const js = transforms.length
+      ? sucraseTransform(code, { transforms, jsxRuntime: "automatic", production: true }).code
+      : code;
+    const result = obfuscator.obfuscate(js, {
       seed,
       compact: true,
       stringArray: true,

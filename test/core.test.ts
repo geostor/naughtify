@@ -86,6 +86,20 @@ console.log(calc(3, 7));`;
   assert.equal(out, naughtifySource(input, { obfuscate: true, canary: "obf-1" }), "obfuscation deterministic");
 }
 
+// --- obfuscate transpiles TS/JSX input first (regression: tsx type annotations)
+{
+  const tsx = `function pair({ start }: { start: number }) {
+  let n: number = start;
+  const next = (): number => ++n;
+  return next() + next();
+}
+export const total: number = pair({ start: 10 });
+console.log(total);`;
+  const out = naughtifySource(tsx, { obfuscate: true, filename: "app.tsx" });
+  assert.equal(run(out), "[[23]]", "obfuscated tsx behaves correctly");
+  assert.doesNotMatch(out, /:\s*number/, "TS types stripped before obfuscation");
+}
+
 // --- seed changes names (per-deploy rotation)
 {
   const input = "function helper(x){const y=x+1;return y} console.log(helper(1));";
