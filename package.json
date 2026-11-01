@@ -1,6 +1,6 @@
 {
   "name": "naughtify",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Make your shipped JavaScript look too alarming for LLM scrapers to read. CLI, Bun plugin and Node API.",
   "type": "module",
   "bin": {
@@ -16,6 +16,14 @@
     "./core": {
       "types": "./dist/core.d.ts",
       "default": "./dist/core.js"
+    },
+    "./signals": {
+      "types": "./dist/signals.d.ts",
+      "default": "./dist/signals.js"
+    },
+    "./decoys": {
+      "types": "./dist/decoys.d.ts",
+      "default": "./dist/decoys.js"
     }
   },
   "files": [
@@ -57,7 +65,8 @@
   "dependencies": {
     "@babel/generator": "^7.26.0",
     "@babel/parser": "^7.26.0",
-    "@babel/traverse": "^7.26.0"
+    "@babel/traverse": "^7.26.0",
+    "javascript-obfuscator": "^5.9.0"
   },
   "devDependencies": {
     "@types/babel__generator": "^7.27.0",

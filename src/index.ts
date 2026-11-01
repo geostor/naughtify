@@ -9,7 +9,12 @@
 import type { BunPlugin, BuildConfig, BuildOutput } from "bun";
 import { naughtifySource, type NaughtifyOptions } from "./core.ts";
 
-export { naughtifySource, type NaughtifyOptions };
+export { naughtifySource, fromInvisible, toInvisible, type NaughtifyOptions } from "./core.ts";
+export {
+  AI_CRAWLERS, aiCrawlerRobotsTxt, canaryBeacon, honeypotLinks,
+  noaiMetaTags, renderAtRuntime, xRobotsHeaders,
+} from "./signals.ts";
+export { generateDecoys } from "./decoys.ts";
 
 const loaderFor = (path: string) =>
   (path.endsWith(".tsx") ? "tsx" : path.endsWith(".ts") ? "ts" : path.endsWith(".jsx") ? "jsx" : "js") as

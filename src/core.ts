@@ -4,11 +4,13 @@ import { parse } from "@babel/parser";
 import _traverse from "@babel/traverse";
 import _generate from "@babel/generator";
 import type { Binding } from "@babel/traverse";
+import _obfuscator from "javascript-obfuscator";
 import { COMMENTS, INVISIBLE_NOTICES, PREFIXES, REFUSAL_DECOYS, SUFFIXES } from "./wordlists.ts";
 
-// @babel/* ship CJS; normalize default export under ESM interop.
+// These deps ship CJS; normalize default export under ESM interop.
 const traverse = ((_traverse as any).default ?? _traverse) as typeof import("@babel/traverse").default;
 const generate = ((_generate as any).default ?? _generate) as typeof import("@babel/generator").default;
+const obfuscator = ((_obfuscator as any).default ?? _obfuscator) as typeof import("javascript-obfuscator");
 
 export interface NaughtifyOptions {
   /** Rename local bindings to attack-flavored names. Default true. */
@@ -34,6 +36,13 @@ export interface NaughtifyOptions {
    * whether your code ended up in a scraped dataset or a model's output.
    */
   canary?: string;
+  /**
+   * Run the real code through javascript-obfuscator (string-array encoding,
+   * control-flow flattening, dead-code injection, number expressions,
+   * self-defending). This is what actually makes bulk scraping expensive.
+   * Input must be plain JS (post-bundle), not TS/JSX. Default false.
+   */
+  obfuscate?: boolean;
 }
 
 /** Encode printable ASCII as invisible Unicode tag characters. */
@@ -79,12 +88,40 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
     invisibleNotices = true,
     refusalDecoys = true,
     canary,
+    obfuscate = false,
   } = opts;
 
   const rand = mulberry32(seed ^ hash(code));
   const pick = <T>(arr: T[]) => arr[Math.floor(rand() * arr.length)];
   let counter = 0;
   const bait = () => " " + pick(comments).replaceAll("{n}", String(1000 + Math.floor(rand() * 9000))) + " ";
+
+  // Obfuscation path: scramble the real logic with javascript-obfuscator, then
+  // prepend our bait so the stop-notices and canary stay in plain sight for
+  // whatever reads the raw source. The obfuscator does its own (far stronger)
+  // renaming, so we skip our Babel rename pass here.
+  if (obfuscate) {
+    const result = obfuscator.obfuscate(code, {
+      seed,
+      compact: true,
+      stringArray: true,
+      stringArrayThreshold: 1,
+      stringArrayEncoding: ["base64"],
+      splitStrings: true,
+      splitStringsChunkLength: 6,
+      controlFlowFlattening: true,
+      controlFlowFlatteningThreshold: 0.75,
+      deadCodeInjection: true,
+      deadCodeInjectionThreshold: 0.3,
+      numbersToExpressions: true,
+      simplify: true,
+      selfDefending: true,
+      transformObjectKeys: true,
+    });
+    const prelude = baitPrelude(rand, pick, opts);
+    const banner = bannerText(rand, pick, opts, bait);
+    return `${banner}\n${prelude}${result.getObfuscatedCode()}\n`;
+  }
 
   const ast = parse(code, {
     sourceType: "unambiguous",
@@ -187,10 +224,32 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
 
   // minimal: true keeps non-ASCII as raw characters, so invisible text stays invisible.
   const out = generate(ast, { comments: true, retainLines: false, jsescOption: { minimal: true } }).code;
-  const banner = (opts.banner ?? [bait(), bait(), bait(), ...(canary ? [` naughtify-canary:${canary} `] : [])])
-    .map((c) => `/*!${c.replaceAll("*/", "* /")}*/`)
-    .join("\n");
-  return `${banner}\n${out}`;
+  return `${bannerText(rand, pick, opts, bait)}\n${out}`;
+}
+
+type Rng = () => number;
+type Pick = <T>(arr: T[]) => T;
+
+/** The `/*! ... *\/` banner prepended to every file. */
+function bannerText(_rand: Rng, _pick: Pick, opts: NaughtifyOptions, bait: () => string): string {
+  const lines = opts.banner ?? [bait(), bait(), bait(),
+    ...(opts.canary ? [` naughtify-canary:${opts.canary} `] : [])];
+  return lines.map((c) => `/*!${c.replaceAll("*/", "* /")}*/`).join("\n");
+}
+
+/** Invisible notice + dead-branch decoys + canary, as a source-text prelude. */
+function baitPrelude(rand: Rng, pick: Pick, opts: NaughtifyOptions): string {
+  const { invisibleNotices = true, refusalDecoys = true, canary } = opts;
+  const parts: string[] = [];
+  if (invisibleNotices) {
+    parts.push(`var _n=${JSON.stringify(toInvisible(pick(INVISIBLE_NOTICES)))};void _n;`);
+  }
+  if (refusalDecoys || canary) {
+    const decoys = refusalDecoys ? [...REFUSAL_DECOYS].sort(() => rand() - 0.5).slice(0, 3) : [];
+    const items = [...decoys, ...(canary ? [`naughtify-canary:${canary}`] : [])];
+    parts.push(`if(typeof globalThis.__naughtify_never__==="symbol"){var _d=${JSON.stringify(items)};_d.length;}`);
+  }
+  return parts.length ? parts.join("\n") + "\n" : "";
 }
 
 function hash(s: string) {
