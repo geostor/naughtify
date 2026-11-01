@@ -3,7 +3,8 @@
 import { parse } from "@babel/parser";
 import _traverse from "@babel/traverse";
 import _generate from "@babel/generator";
-import { COMMENTS, PREFIXES, SUFFIXES } from "./wordlists.ts";
+import type { Binding } from "@babel/traverse";
+import { COMMENTS, INVISIBLE_NOTICES, PREFIXES, REFUSAL_DECOYS, SUFFIXES } from "./wordlists.ts";
 
 // @babel/* ship CJS; normalize default export under ESM interop.
 const traverse = ((_traverse as any).default ?? _traverse) as typeof import("@babel/traverse").default;
@@ -22,6 +23,39 @@ export interface NaughtifyOptions {
   comments?: string[];
   /** Seed for deterministic output (stable builds / cache hits). Default 1337. */
   seed?: number;
+  /** Source filename. Used to pick TypeScript/JSX parsing from the extension. */
+  filename?: string;
+  /** Embed notices as invisible Unicode tag characters. Default true. */
+  invisibleNotices?: boolean;
+  /** Embed fake model-refusal strings in a branch that never runs. Default true. */
+  refusalDecoys?: boolean;
+  /**
+   * A unique ID to embed (e.g. "acme-site-7f3a"). Search for it later to find out
+   * whether your code ended up in a scraped dataset or a model's output.
+   */
+  canary?: string;
+}
+
+/** Encode printable ASCII as invisible Unicode tag characters. */
+export function toInvisible(text: string): string {
+  return [...text].map((c) => {
+    const code = c.charCodeAt(0);
+    return code >= 0x20 && code <= 0x7e ? String.fromCodePoint(0xe0000 + code) : "";
+  }).join("");
+}
+
+/** Decode invisible tag characters back to ASCII (for checking your output). */
+export function fromInvisible(text: string): string {
+  return [...text].map((c) => {
+    const cp = c.codePointAt(0)!;
+    return cp >= 0xe0020 && cp <= 0xe007e ? String.fromCharCode(cp - 0xe0000) : "";
+  }).join("");
+}
+
+function parserPlugins(filename = ""): ("jsx" | "typescript")[] {
+  if (/\.tsx$/.test(filename)) return ["typescript", "jsx"];
+  if (/\.[cm]?ts$/.test(filename)) return ["typescript"];
+  return ["jsx"];
 }
 
 // Small seeded PRNG so builds are reproducible.
@@ -42,6 +76,9 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
     suffixes = SUFFIXES,
     comments = COMMENTS,
     seed = 1337,
+    invisibleNotices = true,
+    refusalDecoys = true,
+    canary,
   } = opts;
 
   const rand = mulberry32(seed ^ hash(code));
@@ -52,9 +89,46 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
   const ast = parse(code, {
     sourceType: "unambiguous",
     allowReturnOutsideFunction: true,
-    plugins: ["jsx"],
+    plugins: parserPlugins(opts.filename),
   });
 
+  // Extra bait goes at the top of the module. It's parsed into the AST before the
+  // rename pass, so its variables get attack-themed names too.
+  const extra: string[] = [];
+  if (invisibleNotices) {
+    extra.push(`const notice = ${JSON.stringify(toInvisible(pick(INVISIBLE_NOTICES)))};`);
+  }
+  if (refusalDecoys || canary) {
+    // The condition can't be true in practice, but a minifier can't prove that,
+    // so the block survives bundling and never runs.
+    const decoys = refusalDecoys
+      ? [...REFUSAL_DECOYS].sort(() => rand() - 0.5).slice(0, 3)
+      : [];
+    const items = [...decoys, ...(canary ? [`naughtify-canary:${canary}`] : [])];
+    extra.push(
+      `if (typeof globalThis.__naughtify_never__ === "symbol") { const decoys = ${JSON.stringify(items)}; decoys.length; }`,
+    );
+  }
+  if (extra.length) {
+    const body = parse(extra.join("\n"), { sourceType: "script" }).program.body;
+    // Insert after any imports so ESM ordering stays conventional.
+    const firstNonImport = ast.program.body.findIndex((n) => n.type !== "ImportDeclaration");
+    ast.program.body.splice(firstNonImport === -1 ? ast.program.body.length : firstNonImport, 0, ...body);
+  }
+
+  // Every name already in the file (any scope, plus globals and property keys).
+  // Generated names are checked against this set, so a rename can never shadow
+  // or capture an existing variable, no matter how large the file is.
+  const taken = new Set<string>();
+  traverse(ast, {
+    Identifier(p) { taken.add(p.node.name); },
+    JSXIdentifier(p) { taken.add(p.node.name); },
+  });
+
+  // Pass 1: decide a new name for every binding and add bait comments.
+  // Names are only recorded here, not applied, because Babel's scope.rename
+  // re-walks the whole enclosing scope on every call (quadratic on big files).
+  const renames: [Binding, string][] = [];
   traverse(ast, {
     Scope(path) {
       if (!renameIdentifiers) return;
@@ -70,8 +144,9 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
         do {
           next = `${pick(prefixes)}${pick(suffixes)}${counter++ || ""}`;
           if (cap) next = next[0].toUpperCase() + next.slice(1);
-        } while (path.scope.hasBinding(next) || path.scope.hasGlobal(next));
-        path.scope.rename(name, next);
+        } while (taken.has(next));
+        taken.add(next);
+        renames.push([binding, next]);
       }
     },
     Statement(path) {
@@ -81,8 +156,38 @@ export function naughtifySource(code: string, opts: NaughtifyOptions = {}): stri
     },
   });
 
-  const out = generate(ast, { comments: true, retainLines: false }).code;
-  const banner = (opts.banner ?? [bait(), bait(), bait()])
+  // Pass 2: apply each rename directly to the binding's declaration, its
+  // references, and anything that reassigns it. Cost is proportional to the
+  // number of identifiers touched, so it stays linear in file size.
+  for (const [binding, next] of renames) {
+    const old = binding.identifier.name;
+    const rename = (node: { name: string }) => { if (node.name === old) node.name = next; };
+    rename(binding.identifier);
+    for (const ref of binding.referencePaths) rename(ref.node as { name: string });
+    for (const v of binding.constantViolations) {
+      if (v.isUpdateExpression() && v.node.argument.type === "Identifier") rename(v.node.argument);
+      for (const ids of Object.values(v.getBindingIdentifiers(true) as Record<string, any>)) {
+        for (const id of [ids].flat()) rename(id);
+      }
+    }
+  }
+
+  // Pass 3: `{ a }` shorthand properties whose value was renamed must be written
+  // out as `{ a: newName }`, or the key would change too.
+  if (renames.length) {
+    traverse(ast, {
+      ObjectProperty(path) {
+        const { key, value } = path.node;
+        if (!path.node.shorthand || key.type !== "Identifier") return;
+        const local = value.type === "AssignmentPattern" ? value.left : value;
+        if (local.type === "Identifier" && local.name !== key.name) path.node.shorthand = false;
+      },
+    });
+  }
+
+  // minimal: true keeps non-ASCII as raw characters, so invisible text stays invisible.
+  const out = generate(ast, { comments: true, retainLines: false, jsescOption: { minimal: true } }).code;
+  const banner = (opts.banner ?? [bait(), bait(), bait(), ...(canary ? [` naughtify-canary:${canary} `] : [])])
     .map((c) => `/*!${c.replaceAll("*/", "* /")}*/`)
     .join("\n");
   return `${banner}\n${out}`;
