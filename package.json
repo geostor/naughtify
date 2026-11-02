@@ -1,7 +1,7 @@
 {
   "name": "naughtify",
   "version": "0.3.1",
-  "description": "Make your shipped JavaScript look too alarming for LLM scrapers to read. CLI, Bun plugin and Node API.",
+  "description": "Make your shipped JavaScript look too alarming for LLM scrapers to read. CLI, Bun plugin, Next.js adapter and Node API.",
   "type": "module",
   "bin": {
     "naughtify": "dist/cli.js"
@@ -24,6 +24,10 @@
     "./decoys": {
       "types": "./dist/decoys.d.ts",
       "default": "./dist/decoys.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "default": "./dist/next.js"
     }
   },
   "files": [
@@ -51,7 +55,9 @@
     "bun",
     "bun-plugin",
     "vite",
-    "cli"
+    "cli",
+    "nextjs",
+    "next-adapter"
   ],
   "engines": {
     "node": ">=20"
@@ -60,7 +66,7 @@
     "build": "tsc",
     "prepublishOnly": "npm run build && npm test",
     "example": "bun example/build.ts",
-    "test": "node test/core.test.ts"
+    "test": "node test/core.test.ts && node test/next.test.ts"
   },
   "dependencies": {
     "@babel/generator": "^7.26.0",
